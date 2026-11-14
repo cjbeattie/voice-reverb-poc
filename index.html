@@ -140,7 +140,7 @@
     <h2>Diagnostics</h2>
     <p id="hint">Not running.</p>
     <pre id="diag"></pre>
-    <div class="row"><button id="copyBtn" class="small">Copy diagnostics</button></div>
+    <div class="row"><button id="copyBtn" class="small">Copy diagnostics</button><button id="recheckBtn" class="small">Re-check output</button></div>
   </section>
 </main>
 
@@ -154,6 +154,7 @@
   let dryGain = null, wetGain = null, convolver = null;
   let timeBuf = null, rafId = 0, diagTimer = 0, lastTunerRun = 0;
   let recentMidi = [], lastPitchAt = 0, irTimer = 0;
+  let deviceRate = 0, probeTimer = 0, engineRebuilds = 0;
 
   function setStatus(text, isWarn) {
     $('status').textContent = text;
@@ -232,13 +233,60 @@
     if (deviceId) audio.deviceId = { exact: deviceId };
     const next = await navigator.mediaDevices.getUserMedia({ audio });
     if (stream) stream.getTracks().forEach((t) => t.stop());
-    if (source) { try { source.disconnect(); } catch (e) {} }
     stream = next;
+    attachSource();
+    await refreshDevices();
+  }
+
+  function attachSource() {
+    if (source) { try { source.disconnect(); } catch (e) {} }
     source = ctx.createMediaStreamSource(stream);
     source.connect(dryGain);
     source.connect(analyser);
     if (convolver) source.connect(convolver);
-    await refreshDevices();
+  }
+
+  // Creates (or re-creates) the audio engine. The engine's sample rate is fixed
+  // at creation, so it is rebuilt when the output device changes mode.
+  function buildEngine() {
+    if (ctx) { try { ctx.close(); } catch (e) {} }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC({ latencyHint: 'interactive' });
+    ctx.resume();
+    dryGain = ctx.createGain(); dryGain.gain.value = 0; dryGain.connect(ctx.destination);
+    wetGain = ctx.createGain(); wetGain.gain.value = 0; wetGain.connect(ctx.destination);
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = ctx.sampleRate > 32000 ? 4096 : 2048;
+    timeBuf = new Float32Array(analyser.fftSize);
+    convolver = null;
+    source = null;
+    rebuildReverb();
+    if (stream) attachSource();
+  }
+
+  // Bluetooth takes a moment to change mode after the mic changes, so the rate
+  // the engine started with can be stale. A throwaway engine reads the current
+  // output rate; if it differs, the real engine is rebuilt to match.
+  function probeOutput(allowRebuild) {
+    if (!ctx) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const p = new AC();
+      deviceRate = p.sampleRate;
+      p.close();
+    } catch (e) { return; }
+    if (allowRebuild && deviceRate !== ctx.sampleRate && engineRebuilds < 3) {
+      engineRebuilds++;
+      buildEngine();
+      applyLevels();
+      scheduleProbe();
+    }
+    updateDiagnostics();
+  }
+
+  function scheduleProbe() {
+    clearTimeout(probeTimer);
+    probeTimer = setTimeout(() => probeOutput(true), 3000);
   }
 
   async function refreshDevices() {
@@ -362,6 +410,7 @@
     const s = track && track.getSettings ? track.getSettings() : {};
     const lines = [
       'Audio engine sample rate: ' + ctx.sampleRate + ' Hz',
+      'Output device rate now:   ' + (deviceRate ? deviceRate + ' Hz' : 'checking…'),
       'Audio engine state:       ' + ctx.state,
       'Base latency:             ' + ms(ctx.baseLatency),
       'Output latency:           ' + ms(ctx.outputLatency),
@@ -378,13 +427,15 @@
     ];
     $('diag').textContent = lines.join('\n');
 
-    const low = Math.min(ctx.sampleRate, s.sampleRate || Infinity);
     const hint = $('hint');
-    if (low <= 24000) {
-      hint.textContent = 'Sample rate is ' + low + ' Hz: this looks like Bluetooth call mode (low quality).';
+    if (!deviceRate) {
+      hint.textContent = 'Checking the output mode…';
+      hint.classList.remove('warn');
+    } else if (deviceRate <= 24000) {
+      hint.textContent = 'Output is at ' + deviceRate + ' Hz: this looks like Bluetooth call mode (low quality).';
       hint.classList.add('warn');
     } else {
-      hint.textContent = 'Sample rate is ' + low + ' Hz: this looks like full-quality audio.';
+      hint.textContent = 'Output is at ' + deviceRate + ' Hz: this looks like full-quality audio.';
       hint.classList.remove('warn');
     }
   }
@@ -400,19 +451,12 @@
       if (navigator.audioSession) {
         try { navigator.audioSession.type = 'play-and-record'; } catch (e) {}
       }
-      const AC = window.AudioContext || window.webkitAudioContext;
-      ctx = new AC({ latencyHint: 'interactive' });
-      ctx.resume();
-
-      dryGain = ctx.createGain(); dryGain.gain.value = 0; dryGain.connect(ctx.destination);
-      wetGain = ctx.createGain(); wetGain.gain.value = 0; wetGain.connect(ctx.destination);
-      analyser = ctx.createAnalyser();
-      analyser.fftSize = ctx.sampleRate > 32000 ? 4096 : 2048;
-      timeBuf = new Float32Array(analyser.fftSize);
-
-      rebuildReverb();
+      deviceRate = 0;
+      engineRebuilds = 0;
+      buildEngine();
       await openMic(deviceId);
       applyLevels();
+      scheduleProbe();
 
       $('stopBtn').disabled = false;
       setStatus('Running. Raise Reverb first, then try Dry voice to hear the delay.');
@@ -428,6 +472,7 @@
   async function stop() {
     cancelAnimationFrame(rafId);
     clearInterval(diagTimer);
+    clearTimeout(probeTimer);
     if (stream) stream.getTracks().forEach((t) => t.stop());
     if (ctx) { try { await ctx.close(); } catch (e) {} }
     ctx = stream = source = analyser = dryGain = wetGain = convolver = null;
@@ -483,6 +528,7 @@
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener('devicechange', () => { refreshDevices(); updateDiagnostics(); });
   }
+  $('recheckBtn').addEventListener('click', () => { engineRebuilds = 0; probeOutput(true); });
   $('copyBtn').addEventListener('click', async () => {
     const text = $('hint').textContent + '\n' + $('diag').textContent;
     try {
