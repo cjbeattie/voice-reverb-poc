@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Reverb POC</title>
+<style>
+  :root {
+    --bg: #f5f4f0; --panel: #ffffff; --text: #1d1d1f; --muted: #6b6b70;
+    --line: #dcdad3; --accent: #3b6fd4; --good: #2e9e5b; --warn: #c9372c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151517; --panel: #1f1f23; --text: #ececee; --muted: #9a9aa2;
+      --line: #34343a; --accent: #7aa2f7; --good: #5fd08a; --warn: #ff7b6e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 8px 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 12px; }
+  p.lead { color: var(--muted); margin: 0 0 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+  button {
+    font: inherit; padding: 12px 18px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.small { padding: 6px 12px; font-size: 14px; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 10px 0; flex-wrap: wrap; }
+  .row label.name { flex: 0 0 96px; }
+  .row input[type=range] { flex: 1 1 160px; min-width: 0; height: 32px; accent-color: var(--accent); }
+  .row output { flex: 0 0 56px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  select { font: inherit; flex: 1 1 200px; min-width: 0; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  .checks label { margin-right: 14px; white-space: nowrap; }
+  .note { font-size: 14px; color: var(--muted); margin: 8px 0 0; }
+  .warn { color: var(--warn); }
+  #meter { height: 10px; background: var(--line); border-radius: 5px; overflow: hidden; flex: 1 1 160px; }
+  #meterFill { height: 100%; width: 0; background: var(--good); }
+  #tuner { text-align: center; }
+  #noteName { font-size: 72px; font-weight: 700; line-height: 1; min-height: 72px; }
+  #noteDetail { color: var(--muted); font-variant-numeric: tabular-nums; min-height: 24px; margin-top: 6px; }
+  #centsBar { position: relative; height: 28px; margin: 14px 0 4px; background: var(--line); border-radius: 14px; }
+  #centsBar .centre { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--muted); }
+  #needle { position: absolute; top: 3px; width: 22px; height: 22px; margin-left: -11px; left: 50%; border-radius: 50%; background: var(--accent); opacity: 0; transition: left .06s linear; }
+  #needle.intune { background: var(--good); }
+  .scale { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 13px/1.5 ui-monospace, Menlo, monospace; }
+  #hint { font-weight: 600; margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Voice Reverb POC</h1>
+  <p class="lead">Live mic with reverb, separate dry and wet levels, and a tuner. Wear headphones.</p>
+
+  <section>
+    <div class="row">
+      <button id="startBtn" class="primary">Start audio</button>
+      <button id="stopBtn" disabled>Stop</button>
+      <div id="meter" title="Mic input level"><div id="meterFill"></div></div>
+    </div>
+    <p id="status" class="note">Both levels start at zero. Raise them once your headphones are in.</p>
+  </section>
+
+  <section>
+    <h2>Levels</h2>
+    <div class="row">
+      <label class="name" for="dry">Dry voice</label>
+      <input id="dry" type="range" min="0" max="100" value="0">
+      <output id="dryOut">0%</output>
+    </div>
+    <div class="row">
+      <label class="name" for="wet">Reverb</label>
+      <input id="wet" type="range" min="0" max="100" value="0">
+      <output id="wetOut">0%</output>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reverb</h2>
+    <div class="row">
+      <button class="small" data-preset="0.8,0.7,0">Room</button>
+      <button class="small" data-preset="2.5,0.55,0">Hall</button>
+      <button class="small" data-preset="5,0.45,0">Cathedral</button>
+      <button class="small" data-preset="9,0.3,0">Wash</button>
+      <button class="small" data-preset="9,0.3,1">Bloom</button>
+    </div>
+    <div class="row">
+      <label class="name" for="swell">Swell</label>
+      <input id="swell" type="range" min="0" max="3" step="0.05" value="0">
+      <output id="swellOut">0.0 s</output>
+    </div>
+    <div class="row">
+      <label class="name" for="decay">Decay</label>
+      <input id="decay" type="range" min="0.3" max="10" step="0.1" value="2.5">
+      <output id="decayOut">2.5 s</output>
+    </div>
+    <div class="row">
+      <label class="name" for="bright">Brightness</label>
+      <input id="bright" type="range" min="0" max="1" step="0.05" value="0.55">
+      <output id="brightOut">55%</output>
+    </div>
+  </section>
+
+  <section>
+    <h2>Tuner</h2>
+    <div id="tuner">
+      <div id="noteName">–</div>
+      <div id="noteDetail">&nbsp;</div>
+      <div id="centsBar"><div class="centre"></div><div id="needle"></div></div>
+      <div class="scale"><span>−50 flat</span><span>in tune</span><span>sharp +50</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Devices</h2>
+    <div class="row">
+      <label class="name" for="inputSel">Mic</label>
+      <select id="inputSel" disabled><option>Start audio to list mics</option></select>
+    </div>
+    <div class="row">
+      <label class="name" for="outputSel">Output</label>
+      <select id="outputSel" disabled><option>Follows the system output</option></select>
+    </div>
+    <p id="outputNote" class="note">This browser may not allow choosing the output here. If so, set it in the system sound settings.</p>
+    <div class="row checks">
+      <label><input type="checkbox" id="ec"> Echo cancellation</label>
+      <label><input type="checkbox" id="ns"> Noise suppression</label>
+      <label><input type="checkbox" id="agc"> Auto gain</label>
+    </div>
+    <p class="note">All three are off by default, which is what singing needs. Toggle them to hear what the browser does to the voice and the routing.</p>
+  </section>
+
+  <section>
+    <h2>Diagnostics</h2>
+    <p id="hint">Not running.</p>
+    <pre id="diag"></pre>
+    <div class="row"><button id="copyBtn" class="small">Copy diagnostics</button></div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const DRY_MAX = 1.0, WET_MAX = 3.0;
+  const NOTE_NAMES = ['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+
+  let ctx = null, stream = null, source = null, analyser = null;
+  let dryGain = null, wetGain = null, convolver = null;
+  let timeBuf = null, rafId = 0, diagTimer = 0, lastTunerRun = 0;
+  let recentMidi = [], lastPitchAt = 0, irTimer = 0;
+
+  function setStatus(text, isWarn) {
+    $('status').textContent = text;
+    $('status').classList.toggle('warn', !!isWarn);
+  }
+
+  // ---------- Reverb ----------
+  // Synthetic impulse response: stereo noise with an exponential decay that
+  // reaches -60 dB at `seconds`, darkening over time through a one-pole lowpass.
+  // `swell` is how long the reverb takes to rise to full level, which removes
+  // the loud early part that makes the Bluetooth delay obvious.
+  function makeImpulse(seconds, brightness, swell) {
+    const sr = ctx.sampleRate;
+    const fadeIn = Math.max(1, Math.floor(sr * Math.max(0.005, swell)));
+    const decayLen = Math.max(1, Math.floor(sr * seconds));
+    const len = fadeIn + decayLen;
+    const ir = ctx.createBuffer(2, len, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = ir.getChannelData(ch);
+      let lp = 0;
+      for (let i = 0; i < len; i++) {
+        const t = i / len;
+        const a = Math.max(0.03, (0.08 + 0.92 * brightness) * (1 - 0.75 * t));
+        lp += a * ((Math.random() * 2 - 1) - lp);
+        let env;
+        if (i < fadeIn) {
+          const r = 0.5 - 0.5 * Math.cos(Math.PI * i / fadeIn);
+          env = r * r;
+        } else {
+          env = Math.exp(-6.91 * (i - fadeIn) / decayLen);
+        }
+        data[i] = lp * env;
+      }
+    }
+    return ir;
+  }
+
+  function rebuildReverb() {
+    if (!ctx) return;
+    const next = ctx.createConvolver();
+    next.buffer = makeImpulse(parseFloat($('decay').value), parseFloat($('bright').value), parseFloat($('swell').value));
+    next.connect(wetGain);
+    if (source) source.connect(next);
+    if (convolver) { try { convolver.disconnect(); } catch (e) {} }
+    convolver = next;
+  }
+
+  function scheduleReverbRebuild() {
+    clearTimeout(irTimer);
+    irTimer = setTimeout(rebuildReverb, 120);
+  }
+
+  // ---------- Levels ----------
+  function applyLevels() {
+    const d = $('dry').value / 100, w = $('wet').value / 100;
+    $('dryOut').textContent = Math.round(d * 100) + '%';
+    $('wetOut').textContent = Math.round(w * 100) + '%';
+    if (!ctx) return;
+    dryGain.gain.setTargetAtTime(d * d * DRY_MAX, ctx.currentTime, 0.02);
+    wetGain.gain.setTargetAtTime(w * w * WET_MAX, ctx.currentTime, 0.02);
+  }
+
+  function updateReverbLabels() {
+    $('decayOut').textContent = parseFloat($('decay').value).toFixed(1) + ' s';
+    $('brightOut').textContent = Math.round($('bright').value * 100) + '%';
+    $('swellOut').textContent = parseFloat($('swell').value).toFixed(1) + ' s';
+  }
+
+  // ---------- Mic ----------
+  async function openMic(deviceId) {
+    const audio = {
+      echoCancellation: $('ec').checked,
+      noiseSuppression: $('ns').checked,
+      autoGainControl: $('agc').checked,
+    };
+    if (deviceId) audio.deviceId = { exact: deviceId };
+    const next = await navigator.mediaDevices.getUserMedia({ audio });
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (source) { try { source.disconnect(); } catch (e) {} }
+    stream = next;
+    source = ctx.createMediaStreamSource(stream);
+    source.connect(dryGain);
+    source.connect(analyser);
+    if (convolver) source.connect(convolver);
+    await refreshDevices();
+  }
+
+  async function refreshDevices() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const track = stream && stream.getAudioTracks()[0];
+    const currentId = track && track.getSettings ? track.getSettings().deviceId : '';
+
+    const inSel = $('inputSel');
+    inSel.textContent = '';
+    devices.filter((d) => d.kind === 'audioinput').forEach((d, i) => {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || ('Microphone ' + (i + 1));
+      if (d.deviceId === currentId) o.selected = true;
+      inSel.appendChild(o);
+    });
+    inSel.disabled = !ctx || inSel.options.length === 0;
+
+    const outs = devices.filter((d) => d.kind === 'audiooutput');
+    const outSel = $('outputSel');
+    const canPick = ctx && typeof ctx.setSinkId === 'function' && outs.length > 0;
+    if (canPick) {
+      const keep = outSel.value;
+      outSel.textContent = '';
+      outs.forEach((d, i) => {
+        const o = document.createElement('option');
+        o.value = d.deviceId;
+        o.textContent = d.label || ('Output ' + (i + 1));
+        if (d.deviceId === keep) o.selected = true;
+        outSel.appendChild(o);
+      });
+    }
+    outSel.disabled = !canPick;
+    $('outputNote').hidden = !!canPick;
+  }
+
+  // ---------- Pitch detection (YIN) ----------
+  function detectPitch(buf, sr) {
+    const n = buf.length;
+    const tauMin = Math.max(2, Math.floor(sr / 1200));
+    const tauMax = Math.min(Math.floor(sr / 60), n >> 1);
+    const w = n - tauMax;
+    const d = new Float32Array(tauMax + 1);
+    let running = 0;
+    d[0] = 1;
+    for (let tau = 1; tau <= tauMax; tau++) {
+      let sum = 0;
+      for (let j = 0; j < w; j++) {
+        const diff = buf[j] - buf[j + tau];
+        sum += diff * diff;
+      }
+      running += sum;
+      d[tau] = running > 0 ? (sum * tau) / running : 1;
+    }
+    let tau = -1;
+    for (let t = tauMin; t <= tauMax; t++) {
+      if (d[t] < 0.15) {
+        while (t + 1 <= tauMax && d[t + 1] < d[t]) t++;
+        tau = t;
+        break;
+      }
+    }
+    if (tau < 0) return null;
+    let better = tau;
+    if (tau > 1 && tau < tauMax) {
+      const a = d[tau - 1], b = d[tau], c = d[tau + 1];
+      const denom = a - 2 * b + c;
+      if (denom !== 0) better = tau + (a - c) / (2 * denom);
+    }
+    return sr / better;
+  }
+
+  function showPitch(freq, now) {
+    const needle = $('needle');
+    if (freq) {
+      const midi = 69 + 12 * Math.log2(freq / 440);
+      recentMidi.push(midi);
+      if (recentMidi.length > 5) recentMidi.shift();
+      const sorted = recentMidi.slice().sort((a, b) => a - b);
+      const med = sorted[sorted.length >> 1];
+      const nearest = Math.round(med);
+      const cents = Math.round((med - nearest) * 100);
+      const name = NOTE_NAMES[((nearest % 12) + 12) % 12] + (Math.floor(nearest / 12) - 1);
+      $('noteName').textContent = name;
+      $('noteDetail').textContent =
+        (cents > 0 ? '+' : '') + cents + ' cents · ' + freq.toFixed(1) + ' Hz';
+      needle.style.left = (50 + Math.max(-50, Math.min(50, cents))) + '%';
+      needle.style.opacity = 1;
+      needle.classList.toggle('intune', Math.abs(cents) <= 10);
+      lastPitchAt = now;
+    } else if (now - lastPitchAt > 400) {
+      recentMidi = [];
+      $('noteName').textContent = '–';
+      $('noteDetail').textContent = ' ';
+      needle.style.opacity = 0;
+    }
+  }
+
+  function frame(now) {
+    rafId = requestAnimationFrame(frame);
+    if (!analyser || now - lastTunerRun < 40) return;
+    lastTunerRun = now;
+    analyser.getFloatTimeDomainData(timeBuf);
+    let sq = 0;
+    for (let i = 0; i < timeBuf.length; i++) sq += timeBuf[i] * timeBuf[i];
+    const rms = Math.sqrt(sq / timeBuf.length);
+    const db = 20 * Math.log10(rms + 1e-9);
+    $('meterFill').style.width = Math.max(0, Math.min(100, (db + 60) / 60 * 100)) + '%';
+    showPitch(rms > 0.01 ? detectPitch(timeBuf, ctx.sampleRate) : null, now);
+  }
+
+  // ---------- Diagnostics ----------
+  function ms(seconds) {
+    return typeof seconds === 'number' && isFinite(seconds) ? (seconds * 1000).toFixed(1) + ' ms' : 'not reported';
+  }
+
+  function updateDiagnostics() {
+    if (!ctx) return;
+    const track = stream && stream.getAudioTracks()[0];
+    const s = track && track.getSettings ? track.getSettings() : {};
+    const lines = [
+      'Audio engine sample rate: ' + ctx.sampleRate + ' Hz',
+      'Audio engine state:       ' + ctx.state,
+      'Base latency:             ' + ms(ctx.baseLatency),
+      'Output latency:           ' + ms(ctx.outputLatency),
+      'Mic:                      ' + (track ? track.label || 'unnamed' : 'none'),
+      'Mic sample rate:          ' + (s.sampleRate ? s.sampleRate + ' Hz' : 'not reported'),
+      'Mic channels:             ' + (s.channelCount || 'not reported'),
+      'Mic reported latency:     ' + ms(s.latency),
+      'Echo cancellation:        ' + (s.echoCancellation === undefined ? 'not reported' : s.echoCancellation),
+      'Noise suppression:        ' + (s.noiseSuppression === undefined ? 'not reported' : s.noiseSuppression),
+      'Auto gain:                ' + (s.autoGainControl === undefined ? 'not reported' : s.autoGainControl),
+      'Audio session type:       ' + (navigator.audioSession ? navigator.audioSession.type : 'not available'),
+      'Output picker:            ' + (typeof ctx.setSinkId === 'function' ? 'available' : 'not available'),
+      'Browser:                  ' + navigator.userAgent,
+    ];
+    $('diag').textContent = lines.join('\n');
+
+    const low = Math.min(ctx.sampleRate, s.sampleRate || Infinity);
+    const hint = $('hint');
+    if (low <= 24000) {
+      hint.textContent = 'Sample rate is ' + low + ' Hz: this looks like Bluetooth call mode (low quality).';
+      hint.classList.add('warn');
+    } else {
+      hint.textContent = 'Sample rate is ' + low + ' Hz: this looks like full-quality audio.';
+      hint.classList.remove('warn');
+    }
+  }
+
+  // ---------- Start / stop ----------
+  async function start(deviceId) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('Mic access is not available. The page must be on HTTPS or localhost.', true);
+      return;
+    }
+    $('startBtn').disabled = true;
+    try {
+      if (navigator.audioSession) {
+        try { navigator.audioSession.type = 'play-and-record'; } catch (e) {}
+      }
+      const AC = window.AudioContext || window.webkitAudioContext;
+      ctx = new AC({ latencyHint: 'interactive' });
+      ctx.resume();
+
+      dryGain = ctx.createGain(); dryGain.gain.value = 0; dryGain.connect(ctx.destination);
+      wetGain = ctx.createGain(); wetGain.gain.value = 0; wetGain.connect(ctx.destination);
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = ctx.sampleRate > 32000 ? 4096 : 2048;
+      timeBuf = new Float32Array(analyser.fftSize);
+
+      rebuildReverb();
+      await openMic(deviceId);
+      applyLevels();
+
+      $('stopBtn').disabled = false;
+      setStatus('Running. Raise Reverb first, then try Dry voice to hear the delay.');
+      rafId = requestAnimationFrame(frame);
+      updateDiagnostics();
+      diagTimer = setInterval(updateDiagnostics, 1000);
+    } catch (err) {
+      setStatus('Could not start: ' + (err && err.message ? err.message : err), true);
+      await stop();
+    }
+  }
+
+  async function stop() {
+    cancelAnimationFrame(rafId);
+    clearInterval(diagTimer);
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (ctx) { try { await ctx.close(); } catch (e) {} }
+    ctx = stream = source = analyser = dryGain = wetGain = convolver = null;
+    $('startBtn').disabled = false;
+    $('stopBtn').disabled = true;
+    $('inputSel').disabled = true;
+    $('outputSel').disabled = true;
+    $('meterFill').style.width = '0';
+    $('hint').textContent = 'Not running.';
+    $('hint').classList.remove('warn');
+    showPitch(null, Infinity);
+  }
+
+  async function reopenMic() {
+    // Restart the whole audio engine: its sample rate is fixed when it is created,
+    // so a fresh one is needed for the readout to reflect the new routing.
+    if (!ctx) return;
+    const id = $('inputSel').value || undefined;
+    await stop();
+    await start(id);
+  }
+
+  // ---------- Wiring ----------
+  $('startBtn').addEventListener('click', () => start());
+  $('stopBtn').addEventListener('click', () => { stop(); setStatus('Stopped.'); });
+  $('dry').addEventListener('input', applyLevels);
+  $('wet').addEventListener('input', applyLevels);
+  $('decay').addEventListener('input', () => { updateReverbLabels(); scheduleReverbRebuild(); });
+  $('bright').addEventListener('input', () => { updateReverbLabels(); scheduleReverbRebuild(); });
+  $('swell').addEventListener('input', () => { updateReverbLabels(); scheduleReverbRebuild(); });
+  document.querySelectorAll('[data-preset]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const [decay, bright, swell] = b.dataset.preset.split(',');
+      $('decay').value = decay;
+      $('bright').value = bright;
+      $('swell').value = swell;
+      updateReverbLabels();
+      rebuildReverb();
+    });
+  });
+  $('inputSel').addEventListener('change', reopenMic);
+  ['ec', 'ns', 'agc'].forEach((id) => $(id).addEventListener('change', reopenMic));
+  $('outputSel').addEventListener('change', async () => {
+    if (!ctx || typeof ctx.setSinkId !== 'function') return;
+    try {
+      const id = $('outputSel').value;
+      await ctx.setSinkId(id === 'default' ? '' : id);
+      updateDiagnostics();
+    } catch (err) {
+      setStatus('Could not switch output: ' + (err && err.message ? err.message : err), true);
+    }
+  });
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', () => { refreshDevices(); updateDiagnostics(); });
+  }
+  $('copyBtn').addEventListener('click', async () => {
+    const text = $('hint').textContent + '\n' + $('diag').textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      $('copyBtn').textContent = 'Copied';
+    } catch (e) {
+      $('copyBtn').textContent = 'Select the text above to copy';
+    }
+    setTimeout(() => { $('copyBtn').textContent = 'Copy diagnostics'; }, 1500);
+  });
+  // Browsers can leave the audio engine suspended (or iOS can interrupt it); any tap revives it.
+  document.addEventListener('pointerdown', () => {
+    if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
+  });
+  updateReverbLabels();
+})();
+</script>
+</body>
+</html>
