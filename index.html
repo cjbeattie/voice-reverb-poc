@@ -108,6 +108,31 @@
   </section>
 
   <section>
+    <h2>Music</h2>
+    <div class="row">
+      <button id="padBtn" class="small">Play pad</button>
+      <button id="fileBtn" class="small" disabled>Play file</button>
+      <input id="fileIn" type="file" accept="audio/*">
+    </div>
+    <div class="row">
+      <label class="name" for="music">Music level</label>
+      <input id="music" type="range" min="0" max="100" value="50">
+      <output id="musicOut">50%</output>
+    </div>
+    <p class="note">The pad is a held chord spread wide across left and right, so mono output is easy to hear. Choose an audio file to judge real music; it loops.</p>
+  </section>
+
+  <section>
+    <h2>Recording</h2>
+    <div class="row">
+      <button id="recBtn" class="small">Record</button>
+      <a id="recLink" hidden>Download recording</a>
+    </div>
+    <audio id="recAudio" controls hidden style="width:100%"></audio>
+    <p class="note">Records the mix of voice, reverb and music as the page produces it, before it reaches the headphones.</p>
+  </section>
+
+  <section>
     <h2>Tuner</h2>
     <div id="tuner">
       <div id="noteName">–</div>
@@ -128,6 +153,13 @@
       <select id="outputSel" disabled><option>Follows the system output</option></select>
     </div>
     <p id="outputNote" class="note">This browser may not allow choosing the output here. If so, set it in the system sound settings.</p>
+    <div class="row" id="sessionRow" hidden>
+      <label class="name" for="sessionSel">Session</label>
+      <select id="sessionSel">
+        <option value="play-and-record" selected>Play and record</option>
+        <option value="auto">Automatic</option>
+      </select>
+    </div>
     <div class="row checks">
       <label><input type="checkbox" id="ec"> Echo cancellation</label>
       <label><input type="checkbox" id="ns"> Noise suppression</label>
@@ -155,6 +187,91 @@
   let timeBuf = null, rafId = 0, diagTimer = 0, lastTunerRun = 0;
   let recentMidi = [], lastPitchAt = 0, irTimer = 0;
   let deviceRate = 0, probeTimer = 0, engineRebuilds = 0;
+  let master = null, musicGain = null, recDest = null, recorder = null, recChunks = [];
+  let padOn = false, padOut = null, padOscs = [];
+  let fileBuffer = null, fileOn = false, fileSrc = null;
+  const PAD_NOTES = [130.81, 164.81, 196.0, 246.94, 293.66]; // C major 9
+
+  // ---------- Music ----------
+  function startPad() {
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 2600; lp.Q.value = 0.4;
+    padOut = ctx.createGain();
+    padOut.gain.value = 0;
+    padOut.gain.setTargetAtTime(0.09, ctx.currentTime, 0.6);
+    lp.connect(padOut); padOut.connect(musicGain);
+    padOscs = [];
+    PAD_NOTES.forEach((f, i) => {
+      [-7, 7].forEach((detune, k) => {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth'; o.frequency.value = f; o.detune.value = detune;
+        if (ctx.createStereoPanner) {
+          const pan = ctx.createStereoPanner();
+          pan.pan.value = (k ? 1 : -1) * (0.3 + 0.15 * i);
+          o.connect(pan); pan.connect(lp);
+        } else {
+          o.connect(lp);
+        }
+        o.start();
+        padOscs.push(o);
+      });
+    });
+  }
+
+  function stopPad() {
+    if (!ctx || !padOut) return;
+    const t = ctx.currentTime;
+    padOut.gain.setTargetAtTime(0, t, 0.3);
+    padOscs.forEach((o) => { try { o.stop(t + 2); } catch (e) {} });
+    padOscs = []; padOut = null;
+  }
+
+  function startFile() {
+    fileSrc = ctx.createBufferSource();
+    fileSrc.buffer = fileBuffer;
+    fileSrc.loop = true;
+    fileSrc.connect(musicGain);
+    fileSrc.start();
+  }
+
+  function stopFile() {
+    if (fileSrc) { try { fileSrc.stop(); } catch (e) {} }
+    fileSrc = null;
+  }
+
+  function updateMusicButtons() {
+    $('padBtn').textContent = padOn ? 'Stop pad' : 'Play pad';
+    $('fileBtn').textContent = fileOn ? 'Stop file' : 'Play file';
+    $('fileBtn').disabled = !fileBuffer;
+  }
+
+  // ---------- Recording ----------
+  function stopRecording() {
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+  }
+
+  function toggleRecording() {
+    if (recorder) { stopRecording(); return; }
+    if (!ctx) { setStatus('Start audio before recording.', true); return; }
+    if (!window.MediaRecorder) { setStatus('This browser cannot record here.', true); return; }
+    recChunks = [];
+    const rec = new MediaRecorder(recDest.stream);
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+    rec.onstop = () => {
+      const type = rec.mimeType || 'audio/webm';
+      const url = URL.createObjectURL(new Blob(recChunks, { type }));
+      $('recAudio').src = url; $('recAudio').hidden = false;
+      const link = $('recLink');
+      link.href = url; link.hidden = false;
+      link.download = 'voice-reverb.' + (type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm');
+      link.textContent = 'Download recording (' + type.split(';')[0] + ')';
+      recorder = null;
+      $('recBtn').textContent = 'Record';
+    };
+    recorder = rec;
+    rec.start();
+    $('recBtn').textContent = 'Stop recording';
+  }
 
   function setStatus(text, isWarn) {
     $('status').textContent = text;
@@ -212,7 +329,10 @@
     const d = $('dry').value / 100, w = $('wet').value / 100;
     $('dryOut').textContent = Math.round(d * 100) + '%';
     $('wetOut').textContent = Math.round(w * 100) + '%';
+    const m = $('music').value / 100;
+    $('musicOut').textContent = Math.round(m * 100) + '%';
     if (!ctx) return;
+    musicGain.gain.setTargetAtTime(m * m, ctx.currentTime, 0.02);
     dryGain.gain.setTargetAtTime(d * d * DRY_MAX, ctx.currentTime, 0.02);
     wetGain.gain.setTargetAtTime(w * w * WET_MAX, ctx.currentTime, 0.02);
   }
@@ -249,12 +369,21 @@
   // Creates (or re-creates) the audio engine. The engine's sample rate is fixed
   // at creation, so it is rebuilt when the output device changes mode.
   function buildEngine() {
+    stopRecording();
     if (ctx) { try { ctx.close(); } catch (e) {} }
     const AC = window.AudioContext || window.webkitAudioContext;
     ctx = new AC({ latencyHint: 'interactive' });
     ctx.resume();
-    dryGain = ctx.createGain(); dryGain.gain.value = 0; dryGain.connect(ctx.destination);
-    wetGain = ctx.createGain(); wetGain.gain.value = 0; wetGain.connect(ctx.destination);
+    master = ctx.createGain();
+    master.connect(ctx.destination);
+    recDest = ctx.createMediaStreamDestination();
+    master.connect(recDest);
+    dryGain = ctx.createGain(); dryGain.gain.value = 0; dryGain.connect(master);
+    wetGain = ctx.createGain(); wetGain.gain.value = 0; wetGain.connect(master);
+    musicGain = ctx.createGain(); musicGain.gain.value = 0; musicGain.connect(master);
+    padOut = null; padOscs = []; fileSrc = null;
+    if (padOn) startPad();
+    if (fileOn && fileBuffer) startFile();
     analyser = ctx.createAnalyser();
     analyser.fftSize = ctx.sampleRate > 32000 ? 4096 : 2048;
     timeBuf = new Float32Array(analyser.fftSize);
@@ -449,7 +578,7 @@
     $('startBtn').disabled = true;
     try {
       if (navigator.audioSession) {
-        try { navigator.audioSession.type = 'play-and-record'; } catch (e) {}
+        try { navigator.audioSession.type = $('sessionSel').value; } catch (e) {}
       }
       deviceRate = 0;
       engineRebuilds = 0;
@@ -473,9 +602,13 @@
     cancelAnimationFrame(rafId);
     clearInterval(diagTimer);
     clearTimeout(probeTimer);
+    stopRecording();
+    padOn = false; fileOn = false; padOut = null; padOscs = []; fileSrc = null;
+    updateMusicButtons();
     if (stream) stream.getTracks().forEach((t) => t.stop());
     if (ctx) { try { await ctx.close(); } catch (e) {} }
     ctx = stream = source = analyser = dryGain = wetGain = convolver = null;
+    master = musicGain = recDest = null;
     $('startBtn').disabled = false;
     $('stopBtn').disabled = true;
     $('inputSel').disabled = true;
@@ -491,8 +624,11 @@
     // so a fresh one is needed for the readout to reflect the new routing.
     if (!ctx) return;
     const id = $('inputSel').value || undefined;
+    const keepPad = padOn, keepFile = fileOn;
     await stop();
+    padOn = keepPad; fileOn = keepFile;
     await start(id);
+    updateMusicButtons();
   }
 
   // ---------- Wiring ----------
@@ -528,6 +664,42 @@
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener('devicechange', () => { refreshDevices(); updateDiagnostics(); });
   }
+  $('music').addEventListener('input', applyLevels);
+  $('padBtn').addEventListener('click', () => {
+    if (!ctx) { setStatus('Start audio before playing the pad.', true); return; }
+    padOn = !padOn;
+    if (padOn) startPad(); else stopPad();
+    updateMusicButtons();
+  });
+  $('fileBtn').addEventListener('click', () => {
+    if (!ctx) { setStatus('Start audio before playing the file.', true); return; }
+    if (!fileBuffer) return;
+    fileOn = !fileOn;
+    if (fileOn) startFile(); else stopFile();
+    updateMusicButtons();
+  });
+  $('fileIn').addEventListener('change', async () => {
+    const f = $('fileIn').files[0];
+    if (!f) return;
+    if (!ctx) { setStatus('Start audio first, then choose the file again.', true); $('fileIn').value = ''; return; }
+    try {
+      const data = await f.arrayBuffer();
+      fileBuffer = await new Promise((res, rej) => {
+        const p = ctx.decodeAudioData(data, res, rej);
+        if (p && p.catch) p.catch(rej);
+      });
+      if (fileOn) { stopFile(); startFile(); }
+      updateMusicButtons();
+      setStatus('Loaded ' + f.name + ' (' + fileBuffer.numberOfChannels + ' channel, ' + fileBuffer.sampleRate + ' Hz).');
+    } catch (err) {
+      setStatus('Could not read that audio file.', true);
+    }
+  });
+  $('recBtn').addEventListener('click', toggleRecording);
+  if (navigator.audioSession) $('sessionRow').hidden = false;
+  $('sessionSel').addEventListener('change', () => {
+    if (ctx) reopenMic();
+  });
   $('recheckBtn').addEventListener('click', () => { engineRebuilds = 0; probeOutput(true); });
   $('copyBtn').addEventListener('click', async () => {
     const text = $('hint').textContent + '\n' + $('diag').textContent;
